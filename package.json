@@ -12,6 +12,7 @@
   "dependencies": {
     "@azure/data-tables": "^13.2.2",
     "@azure/functions": "^4.0.0",
+    "firebase-admin": "^13.5.0",
     "node-apn": "^3.0.0"
   },
   "devDependencies": {

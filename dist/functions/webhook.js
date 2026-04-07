@@ -37,6 +37,8 @@ exports.webhookHandler = webhookHandler;
 const functions_1 = require("@azure/functions");
 const data_tables_1 = require("@azure/data-tables");
 const apn = __importStar(require("node-apn"));
+const app_1 = require("firebase-admin/app");
+const messaging_1 = require("firebase-admin/messaging");
 // Configuración de Table Storage
 const storageAccountName = process.env.STORAGE_ACCOUNT_NAME || "";
 const storageAccountKey = process.env.STORAGE_ACCOUNT_KEY || "";
@@ -56,6 +58,36 @@ const apnOptions = {
 let apnProvider = null;
 if (apnOptions.token.key) {
     apnProvider = new apn.Provider(apnOptions);
+}
+let firebaseApp = null;
+let firebaseMessaging = null;
+try {
+    const fcmProjectId = process.env.FCM_PROJECT_ID || "";
+    const fcmClientEmail = process.env.FCM_CLIENT_EMAIL || "";
+    const fcmPrivateKey = (process.env.FCM_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "";
+    const serviceAccountB64 = process.env.FIREBASE_SERVICE_ACCOUNT_B64 || "";
+    const decodedJson = serviceAccountB64 ? Buffer.from(serviceAccountB64, "base64").toString("utf8") : "";
+    const serviceAccountRaw = serviceAccountJson || decodedJson;
+    let serviceAccount = null;
+    if (fcmProjectId && fcmClientEmail && fcmPrivateKey) {
+        serviceAccount = {
+            projectId: fcmProjectId,
+            clientEmail: fcmClientEmail,
+            privateKey: fcmPrivateKey,
+        };
+    }
+    else if (serviceAccountRaw) {
+        serviceAccount = JSON.parse(serviceAccountRaw);
+    }
+    if (serviceAccount) {
+        firebaseApp = (0, app_1.getApps)().length ? (0, app_1.getApps)()[0] : (0, app_1.initializeApp)({ credential: (0, app_1.cert)(serviceAccount) });
+        firebaseMessaging = (0, messaging_1.getMessaging)(firebaseApp);
+    }
+}
+catch (error) {
+    // Keep function alive even if Android push config is invalid
+    firebaseMessaging = null;
 }
 async function webhookHandler(request, context) {
     context.log(`Webhook received from Vio. Method: ${request.method}`);
@@ -96,6 +128,24 @@ async function webhookHandler(request, context) {
                     context.log(`APNs Result for ${entity.rowKey}:`, JSON.stringify(result));
                     if (result.sent.length > 0)
                         notifiedCount++;
+                }
+                else if (entity.platform === "android" && firebaseMessaging) {
+                    const token = String(entity.rowKey);
+                    const message = {
+                        token,
+                        notification: {
+                            title: "Added to cart",
+                            body: `${productName || "Product"} — tap to purchase`,
+                        },
+                        data: {
+                            productId: String(productId),
+                            campaignId: String(campaignId),
+                            action: "open_product",
+                        },
+                    };
+                    const result = await firebaseMessaging.send(message);
+                    context.log(`FCM Result for ${token}: ${result}`);
+                    notifiedCount++;
                 }
                 else {
                     context.log(`Mock Push for ${entity.platform}: ${productName}`);

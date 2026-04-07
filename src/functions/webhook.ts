@@ -1,6 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TableClient, AzureNamedKeyCredential } from "@azure/data-tables";
 import * as apn from "node-apn";
+import { initializeApp, cert, getApps, App as FirebaseApp } from "firebase-admin/app";
+import { getMessaging, Messaging } from "firebase-admin/messaging";
 
 // Configuración de Table Storage
 const storageAccountName = process.env.STORAGE_ACCOUNT_NAME || "";
@@ -24,6 +26,32 @@ const apnOptions = {
 let apnProvider: apn.Provider | null = null;
 if (apnOptions.token.key) {
     apnProvider = new apn.Provider(apnOptions);
+}
+
+let firebaseApp: FirebaseApp | null = null;
+let firebaseMessaging: Messaging | null = null;
+
+try {
+    const fcmProjectId = process.env.FCM_PROJECT_ID || "";
+    const fcmClientEmail = process.env.FCM_CLIENT_EMAIL || "";
+    const fcmPrivateKey = (process.env.FCM_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+
+    let serviceAccount: any = null;
+    if (fcmProjectId && fcmClientEmail && fcmPrivateKey) {
+        serviceAccount = {
+            projectId: fcmProjectId,
+            clientEmail: fcmClientEmail,
+            privateKey: fcmPrivateKey,
+        };
+    }
+
+    if (serviceAccount) {
+        firebaseApp = getApps().length ? getApps()[0] : initializeApp({ credential: cert(serviceAccount) });
+        firebaseMessaging = getMessaging(firebaseApp);
+    }
+} catch (error) {
+    // Keep function alive even if Android push config is invalid
+    firebaseMessaging = null;
 }
 
 export async function webhookHandler(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -72,6 +100,23 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
                     const result = await apnProvider.send(note, String(entity.rowKey));
                     context.log(`APNs Result for ${entity.rowKey}:`, JSON.stringify(result));
                     if (result.sent.length > 0) notifiedCount++;
+                } else if (entity.platform === "android" && firebaseMessaging) {
+                    const token = String(entity.rowKey);
+                    const message = {
+                        token,
+                        notification: {
+                            title: "Added to cart",
+                            body: `${productName || "Product"} — tap to purchase`,
+                        },
+                        data: {
+                            productId: String(productId),
+                            campaignId: String(campaignId),
+                            action: "open_product",
+                        },
+                    };
+                    const result = await firebaseMessaging.send(message);
+                    context.log(`FCM Result for ${token}: ${result}`);
+                    notifiedCount++;
                 } else {
                     context.log(`Mock Push for ${entity.platform}: ${productName}`);
                     notifiedCount++;
