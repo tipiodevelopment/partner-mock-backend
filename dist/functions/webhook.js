@@ -138,9 +138,12 @@ async function webhookHandler(request, context) {
                             body: `${productName || "Product"} — tap to purchase`,
                         },
                         data: {
-                            productId: String(productId),
-                            campaignId: String(campaignId),
-                            action: "open_product",
+                            vio_notification_version: 1,
+                            vio_event_type: "cart_intent",
+                            vio_cartIntent_kind: "cart_intent",
+                            vio_cartIntent_productId: String(productId),
+                            vio_cartIntent_campaignId: String(campaignId),
+                            vio_cartIntent_productName: productName || ""
                         },
                     };
                     const result = await firebaseMessaging.send(message);
