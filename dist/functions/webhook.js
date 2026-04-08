@@ -37,67 +37,58 @@ exports.webhookHandler = webhookHandler;
 const functions_1 = require("@azure/functions");
 const data_tables_1 = require("@azure/data-tables");
 const apn = __importStar(require("node-apn"));
-const app_1 = require("firebase-admin/app");
-const messaging_1 = require("firebase-admin/messaging");
-// Configuración de Table Storage
+const admin = __importStar(require("firebase-admin"));
+// --- Configuración Storage ---
 const storageAccountName = process.env.STORAGE_ACCOUNT_NAME || "";
 const storageAccountKey = process.env.STORAGE_ACCOUNT_KEY || "";
 const tableName = "DeviceRegistration";
 const tableClient = (storageAccountName && storageAccountKey)
     ? new data_tables_1.TableClient(`https://${storageAccountName}.table.core.windows.net`, tableName, new data_tables_1.AzureNamedKeyCredential(storageAccountName, storageAccountKey))
     : null;
-// Configuración APNs (TV2 Demo)
+// --- Configuración APNs (iOS) ---
 const apnOptions = {
     token: {
-        key: process.env.APNS_P8_CONTENT || "", // Contenido del .p8
-        keyId: process.env.APNS_KEY_ID || "7RCV68L77Z",
-        teamId: process.env.APNS_TEAM_ID || "U4R2B2U7E6",
+        key: process.env.APNS_P8_CONTENT || "",
+        keyId: process.env.APNS_KEY_ID || "",
+        teamId: process.env.APNS_TEAM_ID || "",
     },
-    production: false // Sandbox para lab/demo
+    production: false
 };
 let apnProvider = null;
 if (apnOptions.token.key) {
     apnProvider = new apn.Provider(apnOptions);
 }
-let firebaseApp = null;
-let firebaseMessaging = null;
-try {
-    const fcmProjectId = process.env.FCM_PROJECT_ID || "";
-    const fcmClientEmail = process.env.FCM_CLIENT_EMAIL || "";
-    const fcmPrivateKey = (process.env.FCM_PRIVATE_KEY || "").replace(/\\n/g, "\n");
-    const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON || "";
-    const serviceAccountB64 = process.env.FIREBASE_SERVICE_ACCOUNT_B64 || "";
-    const decodedJson = serviceAccountB64 ? Buffer.from(serviceAccountB64, "base64").toString("utf8") : "";
-    const serviceAccountRaw = serviceAccountJson || decodedJson;
-    let serviceAccount = null;
-    if (fcmProjectId && fcmClientEmail && fcmPrivateKey) {
-        serviceAccount = {
-            projectId: fcmProjectId,
-            clientEmail: fcmClientEmail,
-            privateKey: fcmPrivateKey,
-        };
+// --- Configuración FCM (Android) ---
+if (process.env.FCM_SERVICE_ACCOUNT_JSON && admin.apps.length === 0) {
+    try {
+        const serviceAccount = JSON.parse(process.env.FCM_SERVICE_ACCOUNT_JSON);
+        admin.initializeApp({
+            credential: admin.credential.cert(serviceAccount)
+        });
     }
-    else if (serviceAccountRaw) {
-        serviceAccount = JSON.parse(serviceAccountRaw);
+    catch (e) {
+        console.error("Error initializing Firebase Admin:", e);
     }
-    if (serviceAccount) {
-        firebaseApp = (0, app_1.getApps)().length ? (0, app_1.getApps)()[0] : (0, app_1.initializeApp)({ credential: (0, app_1.cert)(serviceAccount) });
-        firebaseMessaging = (0, messaging_1.getMessaging)(firebaseApp);
-    }
-}
-catch (error) {
-    // Keep function alive even if Android push config is invalid
-    firebaseMessaging = null;
 }
 async function webhookHandler(request, context) {
     context.log(`Webhook received from Vio. Method: ${request.method}`);
     try {
         const body = await request.json();
-        context.log("Payload:", JSON.stringify(body));
-        const { vio_notification_version, vio_event_type, userId, productId, campaignId, productName } = body;
+        const { vio_notification_version, vio_user_id, vio_event_type, vio_payload } = body;
         if (vio_notification_version !== 1 || vio_event_type !== "cart_intent") {
             return { status: 400, body: "Invalid envelope" };
         }
+        if (!vio_user_id || !vio_payload || !vio_payload.product_id || !vio_payload.campaign_id) {
+            return { status: 400, body: "Invalid cart_intent payload" };
+        }
+        const userId = String(vio_user_id);
+        const productId = String(vio_payload.product_id);
+        const campaignId = String(vio_payload.campaign_id);
+        const productName = vio_payload.product_name || "";
+        // Texto de notificación: viene del backend si está, si no usamos fallback
+        const notificationTitle = vio_payload.notification_title || productName || "Nytt produkt";
+        const notificationBody = vio_payload.notification_body ||
+            (productName ? `${productName} – klikk for å kjøpe.` : "Klikk for å kjøpe.");
         context.log(`Buscando dispositivos para userId: ${userId}...`);
         let notifiedCount = 0;
         if (tableClient) {
@@ -105,64 +96,63 @@ async function webhookHandler(request, context) {
                 queryOptions: { filter: `PartitionKey eq '${userId}'` }
             });
             for await (const entity of entities) {
-                if (entity.platform === "ios" && apnProvider) {
+                const deviceToken = String(entity.rowKey);
+                const platform = String(entity.platform).toLowerCase();
+                if (platform === "ios" && apnProvider) {
+                    // --- Lógica iOS (APNs) ---
                     const note = new apn.Notification();
-                    note.expiry = Math.floor(Date.now() / 1000) + 3600; // 1 hora
+                    note.expiry = Math.floor(Date.now() / 1000) + 3600;
                     note.badge = 1;
                     note.sound = "default";
                     note.alert = {
-                        title: "Nuevo producto disponible",
-                        body: `Revisa ${productName || 'el producto'} que vimos en el stream`
+                        title: notificationTitle,
+                        body: notificationBody,
                     };
-                    note.topic = process.env.APNS_BUNDLE_ID || "viodev.tv2demo";
-                    // Payload alineado con feedback de Angelo
+                    note.topic = process.env.APNS_BUNDLE_ID || "";
                     note.payload = {
-                        vio_notification_version: 1,
-                        vio_event_type: "cart_intent",
-                        vio_cartIntent_kind: "cart_intent",
-                        vio_cartIntent_productId: String(productId),
-                        vio_cartIntent_campaignId: String(campaignId),
-                        vio_cartIntent_productName: productName || ""
+                        vio_notification_version,
+                        vio_user_id: userId,
+                        vio_event_type,
+                        vio_payload
                     };
-                    const result = await apnProvider.send(note, String(entity.rowKey));
-                    context.log(`APNs Result for ${entity.rowKey}:`, JSON.stringify(result));
+                    const result = await apnProvider.send(note, deviceToken);
+                    context.log(`APNs Result for ${deviceToken}:`, JSON.stringify(result));
                     if (result.sent.length > 0)
                         notifiedCount++;
                 }
-                else if (entity.platform === "android" && firebaseMessaging) {
-                    const token = String(entity.rowKey);
+                else if (platform === "android" && admin.apps.length > 0) {
+                    // --- Lógica Android (FCM) ---
                     const message = {
-                        token,
+                        token: deviceToken,
                         notification: {
-                            title: "Added to cart",
-                            body: `${productName || "Product"} — tap to purchase`,
+                            title: notificationTitle,
+                            body: notificationBody,
                         },
                         data: {
-                            vio_notification_version: 1,
-                            vio_event_type: "cart_intent",
-                            vio_cartIntent_kind: "cart_intent",
-                            vio_cartIntent_productId: String(productId),
-                            vio_cartIntent_campaignId: String(campaignId),
-                            vio_cartIntent_productName: productName || ""
-                        },
+                            vio_notification_version: String(vio_notification_version ?? "1"),
+                            vio_user_id: userId,
+                            vio_event_type,
+                            // aplanamos vio_payload como string JSON para Android
+                            vio_payload: JSON.stringify(vio_payload)
+                        }
                     };
-                    const result = await firebaseMessaging.send(message);
-                    context.log(`FCM Result for ${token}: ${result}`);
-                    notifiedCount++;
+                    try {
+                        const response = await admin.messaging().send(message);
+                        context.log(`FCM Result for ${deviceToken}:`, response);
+                        notifiedCount++;
+                    }
+                    catch (error) {
+                        context.error(`FCM Error for ${deviceToken}:`, error);
+                    }
                 }
                 else {
-                    context.log(`Mock Push for ${entity.platform}: ${productName}`);
-                    notifiedCount++;
+                    context.log(`Platform ${platform} not supported or provider not configured for token ${deviceToken}`);
                 }
             }
         }
         return {
             status: 200,
-            jsonBody: {
-                status: "success",
-                message: "Webhook processed",
-                devices_notified: notifiedCount
-            }
+            jsonBody: { status: "success", devices_notified: notifiedCount }
         };
     }
     catch (error) {
@@ -188,7 +178,7 @@ functions_1.app.http('registerDevice', {
                 await tableClient.upsertEntity({
                     partitionKey: userId,
                     rowKey: deviceToken,
-                    platform: platform,
+                    platform: platform.toLowerCase(),
                     updatedAt: new Date().toISOString()
                 });
                 return { status: 200, body: "Device registered" };
