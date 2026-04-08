@@ -44,11 +44,26 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
 
     try {
         const body: any = await request.json();
-        const { vio_notification_version, vio_event_type, userId, productId, campaignId, productName } = body;
+
+        const {
+            vio_notification_version,
+            vio_user_id,
+            vio_event_type,
+            vio_payload
+        } = body;
 
         if (vio_notification_version !== 1 || vio_event_type !== "cart_intent") {
             return { status: 400, body: "Invalid envelope" };
         }
+
+        if (!vio_user_id || !vio_payload || !vio_payload.product_id || !vio_payload.campaign_id) {
+            return { status: 400, body: "Invalid cart_intent payload" };
+        }
+
+        const userId = String(vio_user_id);
+        const productId = String(vio_payload.product_id);
+        const campaignId = String(vio_payload.campaign_id);
+        const productName = vio_payload.product_name || "";
 
         context.log(`Buscando dispositivos para userId: ${userId}...`);
         
@@ -74,12 +89,10 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
                     };
                     note.topic = process.env.APNS_BUNDLE_ID || "";
                     note.payload = {
-                        vio_notification_version: 1,
-                        vio_event_type: "cart_intent",
-                        vio_cartIntent_kind: "cart_intent",
-                        vio_cartIntent_productId: String(productId),
-                        vio_cartIntent_campaignId: String(campaignId),
-                        vio_cartIntent_productName: productName || ""
+                        vio_notification_version,
+                        vio_user_id: userId,
+                        vio_event_type,
+                        vio_payload
                     };
                     const result = await apnProvider.send(note, deviceToken);
                     context.log(`APNs Result for ${deviceToken}:`, JSON.stringify(result));
@@ -94,12 +107,11 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
                             body: `Revisa ${productName || 'el producto'} que vimos en el stream`
                         },
                         data: {
-                            vio_notification_version: "1",
-                            vio_event_type: "cart_intent",
-                            vio_cartIntent_kind: "cart_intent",
-                            vio_cartIntent_productId: String(productId),
-                            vio_cartIntent_campaignId: String(campaignId),
-                            vio_cartIntent_productName: productName || ""
+                            vio_notification_version: String(vio_notification_version ?? "1"),
+                            vio_user_id: userId,
+                            vio_event_type,
+                            // aplanamos vio_payload como string JSON para Android
+                            vio_payload: JSON.stringify(vio_payload)
                         }
                     };
                     try {
