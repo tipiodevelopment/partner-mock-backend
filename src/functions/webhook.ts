@@ -1,7 +1,8 @@
 import { app, HttpRequest, HttpResponseInit, InvocationContext } from "@azure/functions";
 import { TableClient, AzureNamedKeyCredential } from "@azure/data-tables";
 import * as apn from "node-apn";
-import * as admin from "firebase-admin";
+import { initializeApp, cert, getApps, App as FirebaseApp } from "firebase-admin/app";
+import { getMessaging, Messaging } from "firebase-admin/messaging";
 
 // --- Configuración Storage ---
 const storageAccountName = process.env.STORAGE_ACCOUNT_NAME || "";
@@ -28,15 +29,30 @@ if (apnOptions.token.key) {
 }
 
 // --- Configuración FCM (Android) ---
-if (process.env.FCM_SERVICE_ACCOUNT_JSON && admin.apps.length === 0) {
-  try {
-    const serviceAccount = JSON.parse(process.env.FCM_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
-    });
-  } catch (e) {
-    console.error("Error initializing Firebase Admin:", e);
-  }
+let firebaseApp: FirebaseApp | null = null;
+let firebaseMessaging: Messaging | null = null;
+
+try {
+    const fcmProjectId = process.env.FCM_PROJECT_ID || "";
+    const fcmClientEmail = process.env.FCM_CLIENT_EMAIL || "";
+    const fcmPrivateKey = (process.env.FCM_PRIVATE_KEY || "").replace(/\\n/g, "\n");
+
+    let serviceAccount: any = null;
+    if (fcmProjectId && fcmClientEmail && fcmPrivateKey) {
+        serviceAccount = {
+            projectId: fcmProjectId,
+            clientEmail: fcmClientEmail,
+            privateKey: fcmPrivateKey,
+        };
+    }
+
+    if (serviceAccount) {
+        firebaseApp = getApps().length ? getApps()[0] : initializeApp({ credential: cert(serviceAccount) });
+        firebaseMessaging = getMessaging(firebaseApp);
+    }
+} catch (error) {
+    // Keep function alive even if Android push config is invalid
+    firebaseMessaging = null;
 }
 
 export async function webhookHandler(request: HttpRequest, context: InvocationContext): Promise<HttpResponseInit> {
@@ -104,7 +120,7 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
           context.log(`APNs Result for ${deviceToken}:`, JSON.stringify(result));
           if (result.sent.length > 0) notifiedCount++;
 
-        } else if (platform === "android" && admin.apps.length > 0) {
+        } else if (platform === "android" && firebaseMessaging) {
           // --- Lógica Android (FCM) ---
           const message = {
             token: deviceToken,
@@ -121,7 +137,7 @@ export async function webhookHandler(request: HttpRequest, context: InvocationCo
             }
           };
           try {
-            const response = await admin.messaging().send(message);
+            const response = await firebaseMessaging.send(message);
             context.log(`FCM Result for ${deviceToken}:`, response);
             notifiedCount++;
           } catch (error) {
